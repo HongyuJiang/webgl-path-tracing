@@ -66,7 +66,7 @@ var lineFragmentSource =
 ' }';
 
 // constants for the shaders
-var bounces = '5';
+var bounces = '10';
 var epsilon = '0.0001';
 var infinity = '10000.0';
 var lightSize = 0.1;
@@ -125,30 +125,51 @@ var normalForCubeSource =
 // no intersection returns a value of +infinity
 var intersectSphereSource =
 ' float intersectSphere(vec3 origin, vec3 ray, vec3 sphereCenter, float sphereRadius) {' +
+'   bool isInSurface = false;'+
 '   vec3 toSphere = origin - sphereCenter;' +
+'   float dis = distance(origin, sphereCenter);'+
+'   if (-0.001 + sphereRadius < dis && dis < sphereRadius + 0.001)'+
+'     isInSurface = true;'+
 '   float a = dot(ray, ray);' +
 '   float b = 2.0 * dot(toSphere, ray);' +
-'   float c = dot(toSphere, toSphere) - sphereRadius*sphereRadius;' +
+'   float c = dot(toSphere, toSphere) - sphereRadius * sphereRadius;' +
 '   float discriminant = b*b - 4.0*a*c;' +
-'   if(discriminant > 0.0) {' +
-'     float t = (-b - sqrt(discriminant)) / (2.0 * a);' +
+'   if(discriminant > -0.001) {' +
+//'     if(isInSurface)' +
+//'        return ' + infinity + ';' +
+'     float t1 = (-b - sqrt(discriminant)) / (2.0 * a);' +
+'     float t2 = (-b + sqrt(discriminant)) / (2.0 * a);' +
+'     if(t1 > 0.0 && !isInSurface) return t1;' +
+'     if(t2 > 0.0 && isInSurface) return t2;' +
+'   }' +
+'   else if(discriminant < 0.0001 && discriminant > -0.0001) {' +
+'     float t = (-b) / (2.0 * a);' +
 '     if(t > 0.0) return t;' +
 '   }' +
 '   return ' + infinity + ';' +
 ' }';
 
+// 找到光线进入球的法向量
 // given that hit is a point on the sphere, what is the surface normal?
 var normalForSphereSource =
-' vec3 normalForSphere(vec3 hit, vec3 sphereCenter, float sphereRadius) {' +
-'   return (hit - sphereCenter) / sphereRadius;' +
+' vec3 normalForSphere(vec3 hit, vec3 ray, vec3 sphereCenter, float sphereRadius) {' +
+'   vec3 _normal = (hit - sphereCenter) / sphereRadius;'+
+'   if (dot(_normal, ray) < 0.0)'+
+'     return -_normal;' +
+'   else return _normal;' +
+' }' +
+' vec3 normalInSphere(vec3 hit, vec3 sphereCenter, float sphereRadius) {' +
+'   return -(hit - sphereCenter) / sphereRadius;' +
 ' }';
 
+// 根据片段位置产生随机位置
 // use the fragment position for randomness
 var randomSource =
 ' float random(vec3 scale, float seed) {' +
 '   return fract(sin(dot(gl_FragCoord.xyz + seed, scale)) * 43758.5453 + seed);' +
 ' }';
 
+// 随机余弦加权分布向量
 // random cosine-weighted distributed vector
 // from http://www.rorydriscoll.com/2009/01/07/better-sampling/
 var cosineWeightedDirectionSource =
@@ -168,6 +189,7 @@ var cosineWeightedDirectionSource =
 '   return r*cos(angle)*sdir + r*sin(angle)*tdir + sqrt(1.-u)*normal;' +
 ' }';
 
+// 随机归一化的向量
 // random normalized vector
 var uniformlyRandomDirectionSource =
 ' vec3 uniformlyRandomDirection(float seed) {' +
@@ -179,6 +201,7 @@ var uniformlyRandomDirectionSource =
 '   return vec3(r * cos(angle), r * sin(angle), z);' +
 ' }';
 
+// 单位球里的随机向量
 // random vector in the unit sphere
 // note: this is probably not statistically uniform, saw raising to 1/3 power somewhere but that looks wrong?
 var uniformlyRandomVectorSource =
@@ -186,35 +209,62 @@ var uniformlyRandomVectorSource =
 '   return uniformlyRandomDirection(seed) * sqrt(random(vec3(36.7539, 50.3658, 306.2759), seed));' +
 ' }';
 
+// 计算折射的贡献量
+// compute refracted lighting contribution
+var specularRefraction =
+' vec3 refractedLight = normalize(refract(light - hit, normal, 1.3));' +
+' specularHighlight = max(0.0, dot(refractedLight, normalize(hit - origin)));';
+
+// 计算镜面反射的贡献量
 // compute specular lighting contribution
 var specularReflection =
 ' vec3 reflectedLight = normalize(reflect(light - hit, normal));' +
 ' specularHighlight = max(0.0, dot(reflectedLight, normalize(hit - origin)));';
 
+// 基于漫反射规则使用法线和跳跃次数更新射线
 // update ray using normal and bounce according to a diffuse reflection
 var newDiffuseRay =
 ' ray = cosineWeightedDirection(timeSinceStart + float(bounce), normal);';
+  specularReflection +
+' specularHighlight = 1.0 * pow(specularHighlight, 2.0);';
 
+// 基于全反射规则使用法线和跳跃次数更新射线
 // update ray using normal according to a specular reflection
 var newReflectiveRay =
 ' ray = reflect(ray, normal);' +
   specularReflection +
-' specularHighlight = 2.0 * pow(specularHighlight, 20.0);';
+' specularHighlight = 1.0 * pow(specularHighlight, 2.0);';
 
+// 基于光泽反射规则使用法线和跳跃次数更新射线
 // update ray using normal and bounce according to a glossy reflection
 var newGlossyRay =
 ' ray = normalize(reflect(ray, normal)) + uniformlyRandomVector(timeSinceStart + float(bounce)) * glossiness;' +
   specularReflection +
 ' specularHighlight = pow(specularHighlight, 3.0);';
 
-var yellowBlueCornellBox =
-' if(hit.x < -0.9999) surfaceColor = vec3(0.1, 0.5, 1.0);' + // blue
-' else if(hit.x > 0.9999) surfaceColor = vec3(1.0, 0.9, 0.1);'; // yellow
+// 基于光线折射规则使用法线和跳跃次数更新射线
+// update ray using normal and bounce according to a glossy reflection
+var newRefractedRay =
+' ray = normalize(refract(ray, normal, 1.3));' +
+//' vec3 refactedRay = refract(ray, normal, 1.0);' 
+' vec3 refractedLight = normalize(refract(light - hit, normal, 1.3));' +
+' specularHighlight = max(0.0, dot(refractedLight, normalize(hit - origin)));';
+' specularHighlight = 1.0 * pow(specularHighlight, 2.0);';
 
+// 包围盒设置
+var yellowBlueCornellBox =
+
+' if(hit.z < -0.9999) surfaceColor = vec3(1.0, 0.1, 0.1);'; // red
+' if(hit.z > 0.9999) surfaceColor = vec3(1.0, 0.1, 0.1);'; // red
+' if(hit.x < -0.9999) surfaceColor = vec3(0.1, 0.5, 1.0);' + // blue
+' if(hit.x > 0.9999) surfaceColor = vec3(1.0, 0.9, 0.1);'; // yellow
+
+// 包围盒设置
 var redGreenCornellBox =
 ' if(hit.x < -0.9999) surfaceColor = vec3(1.0, 0.3, 0.1);' + // red
 ' else if(hit.x > 0.9999) surfaceColor = vec3(0.3, 1.0, 0.1);'; // green
 
+// 产生阴影
 function makeShadow(objects) {
   return '' +
 ' float shadow(vec3 origin, vec3 ray) {' +
@@ -223,58 +273,93 @@ function makeShadow(objects) {
 ' }';
 }
 
+// 计算颜色
 function makeCalculateColor(objects) {
+
+  //重复发射射线
   return '' +
-' vec3 calculateColor(vec3 origin, vec3 ray, vec3 light) {' +
+' vec3 calculateColor(vec3 origin, vec3 ray, vec3 light, int round) {' +
 '   vec3 colorMask = vec3(1.0);' +
 '   vec3 accumulatedColor = vec3(0.0);' +
   
+    // 光追循环
     // main raytracing loop
-'   for(int bounce = 0; bounce < ' + bounces + '; bounce++) {' +
+'   for(int bounce = 0; bounce < ' + 5 + '; bounce++) {' +
+
+      // 计算与所有实体的交集
       // compute the intersection with everything
 '     vec2 tRoom = intersectCube(origin, ray, roomCubeMin, roomCubeMax);' +
       concat(objects, function(o){ return o.getIntersectCode(); }) +
 
+      // 寻找最近的交集
       // find the closest intersection
 '     float t = ' + infinity + ';' +
 '     if(tRoom.x < tRoom.y) t = tRoom.y;' +
+'     vec3 hitCenter;' +
+'     float hitRadius;' +
       concat(objects, function(o){ return o.getMinimumIntersectCode(); }) +
-
+      
+      // 计算击中点
       // info about hit
 '     vec3 hit = origin + ray * t;' +
-'     vec3 surfaceColor = vec3(0.75);' +
+'     vec3 surfaceColor = vec3(0.7, 0.7, 0.7);' +
 '     float specularHighlight = 0.0;' +
 '     vec3 normal;' +
 
+      // 计算法向量以及改变墙的颜色
       // calculate the normal (and change wall color)
+'     bool isRefract = false;'+
 '     if(t == tRoom.y) {' +
 '       normal = -normalForCube(hit, roomCubeMin, roomCubeMax);' +
-        [yellowBlueCornellBox, redGreenCornellBox][environment] +
+        yellowBlueCornellBox +
         newDiffuseRay +
 '     } else if(t == ' + infinity + ') {' +
 '       break;' +
 '     } else {' +
 '       if(false) ;' + // hack to discard the first 'else' in 'else if'
         concat(objects, function(o){ return o.getNormalCalculationCode(); }) +
-        [newDiffuseRay, newReflectiveRay, newGlossyRay][material] +
+//        newRefractedRay +
+'       if (round == 1) {'+
+'         isRefract = true;'+
+'         surfaceColor = vec3(0.9, 0.0, 0.0);' +
+'         vec3 inRay = refract(ray, normal, 1.3);' +
+'         float farPointT = intersectSphere(hit, inRay, hitCenter, hitRadius);'+
+'         vec3 farPoint = hit + inRay * farPointT;' +
+'         vec3 farPointNormal = normalForSphere(farPoint, inRay, hitCenter, hitRadius);'+
+'         vec3 outRay = refract(inRay, farPointNormal, 1.3);' +
+//'       specularHighlight = max(0.0, dot(outRay, normalize(farPoint + outRay * 0.01 - farPoint)));'+
+'         specularHighlight = 0.3;' +
+'         specularHighlight = 2.0 * pow(specularHighlight, 3.0);'+
+'         ray = outRay;' +
+'         hit = farPoint;' +
+'       }' +
+'       else {' +
+          newReflectiveRay +
+'       }' +
 '     }' +
 
+      // 计算漫射光照贡献
       // compute diffuse lighting contribution
 '     vec3 toLight = light - hit;' +
 '     float diffuse = max(0.0, dot(normalize(toLight), normal));' +
 
+      // 追踪阴影光线
       // trace a shadow ray to the light
 '     float shadowIntensity = shadow(hit + normal * ' + epsilon + ', toLight);' +
+'     shadowIntensity = 1.0;' +
 
+      // 光反弹操作
       // do light bounce
 '     colorMask *= surfaceColor;' +
 '     accumulatedColor += colorMask * (' + lightVal + ' * diffuse * shadowIntensity);' +
 '     accumulatedColor += colorMask * specularHighlight * shadowIntensity;' +
 
+      // 计算下一个起跳点
       // calculate next origin
 '     origin = hit;' +
 '   }' +
 
+    // 返回叠加的颜色
 '   return accumulatedColor;' +
 ' }';
 }
@@ -284,11 +369,19 @@ function makeMain() {
 ' void main() {' +
 '   vec3 newLight = light + uniformlyRandomVector(timeSinceStart - 53.0) * ' + lightSize + ';' +
 '   vec3 texture = texture2D(texture, gl_FragCoord.xy / 512.0).rgb;' +
-'   gl_FragColor = vec4(mix(calculateColor(eye, initialRay, newLight), texture, textureWeight), 1.0);' +
+'   for (int i = 1; i < 3; i++) {' +
+'     vec4 temp_color = vec4(mix(calculateColor(eye, initialRay, newLight, i), texture, textureWeight), 1.0);' +
+'     gl_FragColor += temp_color;' +
+'   }' +
+'   gl_FragColor /= 2.0;' +
 ' }';
 }
 
+// 代码组装
 function makeTracerFragmentSource(objects) {
+
+  //console.log(makeCalculateColor(objects))
+
   return tracerFragmentSourceHeader +
   concat(objects, function(o){ return o.getGlobalCode(); }) +
   intersectCubeSource +
@@ -454,12 +547,16 @@ Sphere.prototype.getShadowTestCode = function() {
 
 Sphere.prototype.getMinimumIntersectCode = function() {
   return '' +
-' if(' + this.intersectStr + ' < t) t = ' + this.intersectStr + ';';
+' if(' + this.intersectStr + ' < t + 0.0001 ) {' +
+'   t ='  + this.intersectStr + ';' + 
+'   hitCenter ='  + this.centerStr + ';' +
+'   hitRadius ='  + this.radiusStr + ';' +
+' }'
 };
 
 Sphere.prototype.getNormalCalculationCode = function() {
   return '' +
-' else if(t == ' + this.intersectStr + ') normal = normalForSphere(hit, ' + this.centerStr + ', ' + this.radiusStr + ');';
+' else if(t == ' + this.intersectStr + ') normal = normalForSphere(hit, ray, ' + this.centerStr + ', ' + this.radiusStr + ');';
 };
 
 Sphere.prototype.setUniforms = function(renderer) {
@@ -696,6 +793,9 @@ PathTracer.prototype.setObjects = function(objects) {
   if(this.tracerProgram != null) {
     gl.deleteProgram(this.shaderProgram);
   }
+
+  console.log(makeTracerFragmentSource(objects))
+
   this.tracerProgram = compileShader(tracerVertexSource, makeTracerFragmentSource(objects));
   this.tracerVertexAttribute = gl.getAttribLocation(this.tracerProgram, 'vertex');
   gl.enableVertexAttribArray(this.tracerVertexAttribute);
@@ -731,7 +831,8 @@ PathTracer.prototype.update = function(matrix, timeSinceStart) {
 
   // ping pong textures
   this.textures.reverse();
-  this.sampleCount++;
+  //console.log(this.sampleCount)
+  this.sampleCount+=1;
 };
 
 PathTracer.prototype.render = function() {
@@ -990,6 +1091,8 @@ var RED_GREEN_CORNELL_BOX = 1;
 var environment = YELLOW_BLUE_CORNELL_BOX;
 
 function tick(timeSinceStart) {
+
+  //console.log(timeSinceStart)
   eye.elements[0] = zoomZ * Math.sin(angleY) * Math.cos(angleX);
   eye.elements[1] = zoomZ * Math.sin(angleX);
   eye.elements[2] = zoomZ * Math.cos(angleY) * Math.cos(angleX);
